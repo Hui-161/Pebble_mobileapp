@@ -96,6 +96,7 @@ Examples now:
 | `music`         | `track`                                                           | built-in (Android) |
 | `notifications` | `notification`                                                    | built-in (Android) |
 | `watch`         | `switch_setting`, `number_setting`, `text_setting`, `app_setting` | built-in  |
+| `watch`         | `installed_app` (action `launch_app`)                             | built-in  |
 | `home`          | `home_lights`, `room_lights`, `light`                             | Hue demo  |
 | `finance`       | `stock`                                                           | Stocks demo |
 
