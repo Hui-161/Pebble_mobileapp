@@ -1,26 +1,34 @@
 package io.rebble.libpebblecommon.plugin
 
 import io.rebble.libpebblecommon.SystemAppIDs.SYSTEM_SHORTCUTS
+import io.rebble.libpebblecommon.WatchConfigFlow
 import io.rebble.libpebblecommon.connection.ConnectedPebbleDevice
 import io.rebble.libpebblecommon.connection.Watches
+import io.rebble.libpebblecommon.locker.AppType
 import io.rebble.libpebblecommon.locker.Locker
+import io.rebble.libpebblecommon.locker.LockerWrapper
+import io.rebble.libpebblecommon.locker.SystemApps
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.uuid.Uuid
 
 class WatchStatePlugin(
     private val locker: Locker,
     private val watches: Watches,
+    private val config: WatchConfigFlow,
 ) : NativePlugin {
     override val pluginUuid: Uuid = BUILT_IN_WATCH_STATE_UUID
     override val name: String = "Watch State"
-    override val description: String = "Launch apps and watchfaces on the watch."
+    override val description: String = "The apps and watchfaces on the watch, and launching them."
 
-    override val sources: List<SourceDeclaration> = emptyList()
+    override val sources: List<SourceDeclaration> = listOf(INSTALLED_APPS_SOURCE)
 
     override val actions: List<ActionDeclaration> = listOf(
         ActionDeclaration(
@@ -42,7 +50,16 @@ class WatchStatePlugin(
         item: String,
         properties: List<String>?,
         iconPixelSize: IconPixelSize?,
-    ): Flow<SourceEnvelope> = emptyFlow()
+    ): Flow<SourceEnvelope> {
+        if (!serves(category, item)) return emptyFlow()
+        return combine(onWatch(AppType.Watchapp), onWatch(AppType.Watchface)) { apps, faces ->
+            installedAppsEnvelope(pluginUuid, apps + faces)
+        }
+    }
+
+    // System apps sit outside the sync limit: the watch always has them.
+    private fun onWatch(type: AppType): Flow<List<LockerWrapper>> =
+        locker.getLocker(type, searchQuery = null, limit = config.value.lockerSyncLimitV2 + SystemApps.entries.size)
 
     override suspend fun invoke(action: String, args: JsonObject): ActionResult {
         val connected = watches.watches.value.filterIsInstance<ConnectedPebbleDevice>()
@@ -92,12 +109,57 @@ class WatchStatePlugin(
     }
 
     companion object {
+        const val CATEGORY = "watch"
+        const val ITEM_INSTALLED_APP = "installed_app"
+        const val PROPERTY_TYPE = "type"
+        const val PROPERTY_SYSTEM = "system"
         const val ACTION_LAUNCH_APP = "launch_app"
         const val ACTION_LAUNCH_PREVIOUS_APP = "launch_previous_app"
         const val PARAM_UUID = "uuid"
 
         private val LAUNCH = listOf(PluginPermission(PluginPermissions.LAUNCH_APPS))
 
+        val INSTALLED_APPS_SOURCE = SourceDeclaration(
+            category = CATEGORY,
+            items = listOf(ITEM_INSTALLED_APP),
+            properties = mapOf(
+                SourceInstance.PROPERTY_NAME to listOf(SourceShapeNames.SHORT_TEXT, SourceShapeNames.LONG_TEXT),
+                PROPERTY_TYPE to listOf(SourceShapeNames.SHORT_TEXT),
+                PROPERTY_SYSTEM to listOf(SourceShapeNames.BOOLEAN),
+            ),
+            supportsMultiple = true,
+            callerPermissions = LAUNCH,
+        )
+
         val BUILT_IN_WATCH_STATE_UUID: Uuid = Uuid.parse("00000000-0000-0000-0001-000000000007")
     }
 }
+
+/**
+ * What the watch has, in locker order: synced apps and watchfaces plus the system apps. The
+ * instance id is the uuid that `launch_app` takes.
+ */
+internal fun installedAppsEnvelope(pluginUuid: Uuid, apps: List<LockerWrapper>) = SourceEnvelope(
+    pluginUuid = pluginUuid.toString(),
+    instances = apps
+        .filter { it !is LockerWrapper.NormalApp || it.sync }
+        .map { app ->
+            SourceInstance(
+                instanceId = app.properties.id.toString(),
+                properties = mapOf(
+                    SourceInstance.PROPERTY_NAME to mapOf(
+                        SourceShapeNames.SHORT_TEXT to encode(ShortTextShape(app.properties.title)),
+                        SourceShapeNames.LONG_TEXT to encode(LongTextShape(app.properties.title)),
+                    ),
+                    WatchStatePlugin.PROPERTY_TYPE to mapOf(
+                        SourceShapeNames.SHORT_TEXT to encode(ShortTextShape(app.properties.type.code)),
+                    ),
+                    WatchStatePlugin.PROPERTY_SYSTEM to mapOf(
+                        SourceShapeNames.BOOLEAN to encode(BooleanShape(app is LockerWrapper.SystemApp)),
+                    ),
+                ),
+            )
+        },
+)
+
+private inline fun <reified T> encode(value: T): JsonElement = Json.encodeToJsonElement(value)
